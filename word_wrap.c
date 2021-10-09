@@ -1,11 +1,16 @@
 #include <yed/plugin.h>
 
+void word_wrap(int n_args, char **args);
+
 void remove_preceding_whitespace(yed_buffer *buff, int row);
 void remove_trailing_whitespace(yed_buffer *buff, int row);
-int is_line_all_whitespace(yed_line *line);
 int combine_line_with_next(yed_buffer *buff, yed_line *line, int row, int max_cols);
 int absorb_first_word_of_next_line(yed_buffer *buff, yed_line *line, int row, int max_cols);
-void word_wrap(int n_args, char **args);
+int is_markdown_header(yed_glyph *git);
+int is_markdown_unordered_list(yed_glyph *git);
+int is_whitespace(yed_glyph *git);
+int is_line_all_whitespace(yed_line *line);
+int is_line_markdown_ignore(yed_line *line);
 
 int yed_plugin_boot(yed_plugin *self) {
     YED_PLUG_VERSION_CHECK();
@@ -29,7 +34,7 @@ int is_beginning_of_paragraph(yed_buffer *buff, int row) {
     /* `row` is the beginning of a paragraph if the previous
        row contains no glyphs or all whitespace. */
     yed_line_glyph_traverse(*line, git) {
-        if(git->c != ' ') return 0;
+        if(!is_whitespace(git)) return 0;
     }
     
     return 1;
@@ -47,7 +52,7 @@ void remove_trailing_whitespace(yed_buffer *buff, int row) {
     
     num_glyphs = 0;
     yed_line_glyph_traverse(*line, git) {
-        if(git->c != ' ') {
+        if(!is_whitespace(git)) {
             num_glyphs = 0;
             continue;
         } else {
@@ -72,7 +77,7 @@ void remove_preceding_whitespace(yed_buffer *buff, int row) {
     
     num_glyphs = 0;
     yed_line_glyph_traverse(*line, git) {
-        if(git->c == ' ') num_glyphs++;
+        if(is_whitespace(git)) num_glyphs++;
         else break;
     }
     
@@ -81,11 +86,76 @@ void remove_preceding_whitespace(yed_buffer *buff, int row) {
     }
 }
 
-/* Duh */
+int is_whitespace(yed_glyph *git) {
+  if(git->c == ' ') {
+    return 1;
+  }
+  return 0;
+}
+
+int is_markdown_header(yed_glyph *git) {
+  if(git->c == '#') return 1;
+  if((git->c == '=') || (git->c == '-')) return 1;
+  return 0;
+}
+
+int is_markdown_unordered_list(yed_glyph *git) {
+  if((git->c == '-') ||
+     (git->c == '*') ||
+     (git->c == '+')) {
+       return 1;
+  }
+  return 0;
+}
+
+/* Should we ignore this line due to some Markdown rule?
+   Returns true if the line is:
+   1. A Markdown header
+   2. A Markdown unordered list
+   3. A Markdown ordered list */
+int is_line_markdown_ignore(yed_line *line) {
+    yed_glyph *git;
+    int ordered_list;
+    
+    /* Iterate to the first non-whitespace glyph */
+    ordered_list = 0;
+    yed_line_glyph_traverse(*line, git) {
+        if(is_whitespace(git)) {
+          if(ordered_list) break;
+          continue;
+        }
+        
+        /* Bail out if it's a header or unordered list */
+        if(is_markdown_header(git) ||
+           is_markdown_unordered_list(git)) {
+            return 1;
+        }
+        
+        /* Handle ordered lists (digit followed by a period) */
+        if((git->c >= '0') && (git->c <= '9')) {
+            ordered_list = 1;
+            continue;
+        } else if(ordered_list) {
+          if(git->c == '.') {
+            return 1;
+          } else {
+            /* We got a digit, but the next character was not
+               a period. */
+            break;
+          }
+        }
+        
+        /* If this isn't whitespace or any Markdown
+           header or list character, just bail */
+        break;
+    }
+    return 0;
+}
+
 int is_line_all_whitespace(yed_line *line) {
     yed_glyph *git;
     yed_line_glyph_traverse(*line, git) {
-        if(git->c != ' ') return 0;
+        if(!is_whitespace(git)) return 0;
     }
     return 1;
 }
@@ -123,6 +193,11 @@ int absorb_first_word_of_next_line(yed_buffer *buff, yed_line *line, int row, in
         return 0;
     }
     
+    /* We don't want to combine this line if it's a Markdown header or list */
+    if(is_line_markdown_ignore(next_line)) {
+        return 0;
+    }
+    
     /* Start by inspecting the next line. In order to do anything whatsoever,
        we need `line->visual_width` plus the visual width of the first word on
        the next line to be less than `max_cols`. */
@@ -131,12 +206,12 @@ int absorb_first_word_of_next_line(yed_buffer *buff, yed_line *line, int row, in
     seen_non_whitespace = 0;
     preceding_whitespace = 0;
     yed_line_glyph_traverse(*next_line, git) {
-        if(git->c != ' ') {
+        if(!is_whitespace(git)) {
             seen_non_whitespace = 1;
         }
-        if(seen_non_whitespace && (git->c == ' ')) {
+        if(seen_non_whitespace && is_whitespace(git)) {
             break;
-        } else if(git->c == ' ') {
+        } else if(is_whitespace(git)) {
             preceding_whitespace = 1;
         }
         first_word_visual_width += yed_get_glyph_width(*git);
@@ -208,7 +283,7 @@ int split_line(yed_buffer *buff, int row, int max_cols) {
     line = yed_buff_get_line(buff, row);
     yed_line_glyph_traverse(*line, git) {
         
-        if((prev_git && (prev_git->c == ' ')) && (git->c != ' ')) {
+        if((prev_git && is_whitespace(prev_git)) && (!is_whitespace(git))) {
             /* prev_word_col will never be set to the first column. */
             prev_word_col = col;
         }
@@ -217,7 +292,7 @@ int split_line(yed_buffer *buff, int row, int max_cols) {
         if((col > max_cols) && prev_word_col) {
             /* Break on the last whitespace that we found */
             yed_buff_insert_line(buff, row + 1);
-            if(git->c != ' ') {
+            if(!is_whitespace(git)) {
                 /* If we're in a word, split on the start of the last word we've seen */
                 idx = yed_line_col_to_idx(line, prev_word_col);
             } else {
@@ -251,12 +326,14 @@ void word_wrap(int n_args, char **args) {
     int         r1, c1, r2, c2, row, max_cols, n_lines, num_deleted;
     yed_line   *line;
 
+    /* Read in the argument */
     if (n_args != 1) {
         yed_cerr("expected 1 argument, a maximum number of columns per line");
         return;
     }
     sscanf(args[0], "%d", &max_cols);
 
+    /* Choose the frame and buffer */
     if (!ys->active_frame) {
         yed_cerr("no active frame");
         return;
@@ -267,7 +344,9 @@ void word_wrap(int n_args, char **args) {
         return;
     }
     buff = frame->buffer;
+    
     if (!(buff->has_selection)) {
+        /* If the user hasn't selected anything, just use the whole buffer */
         r1 = 1;
         c1 = 1;
         n_lines = yed_buff_n_lines(buff);
@@ -282,7 +361,7 @@ void word_wrap(int n_args, char **args) {
     for (row = r1; row <= r2; row += 1) {
         line = yed_buff_get_line(buff, row);
         
-        if(!line || is_line_all_whitespace(line)) {
+        if(!line || is_line_all_whitespace(line) || is_line_markdown_ignore(line)) {
             continue;
         }
         if(!is_beginning_of_paragraph(buff, row)) {
